@@ -29,9 +29,14 @@ def get_user_data():
 
 # Procesamiento de usuarios
 users = get_user_data()
+
+if not users:
+    st.error("No se pudieron cargar los usuarios desde Google Sheets")
+    st.stop()
+    
 names = [user[2] for user in users]
 usernames = [user[1] for user in users]
-roles = [user[0].lower() for user in users]
+roles = [user[0] for user in users]
 
 # Generación de contraseñas (basadas en DNI + salt)
 salt = st.secrets.get("PASSWORD_SALT", "default_salt")
@@ -83,7 +88,7 @@ en los últimos 13 meses.
 """)
 
 # Control de acceso basado en roles
-if st.session_state.role in ['analista', 'supervisor']:
+if st.session_state.role in ['ANALISTA', 'SUPERVISOR']:
     search_type = st.radio(
         "Seleccionar tipo de búsqueda:",
         options=["Suministro", "SED"],
