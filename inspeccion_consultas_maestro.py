@@ -3,15 +3,13 @@ from google.cloud import bigquery
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 import pandas as pd
-import pickle
-from pathlib import Path
 import streamlit_authenticator as stauth
 import hashlib
 
 # ===== CONFIGURACIÓN DE AUTENTICACIÓN =====
 @st.cache_data(ttl=3600)
 def get_user_data():
-    """Obtiene datos de usuarios desde Google Sheets"""
+    """Obtiene usuarios con contraseñas desde Google Sheets"""
     try:
         creds = service_account.Credentials.from_service_account_info(
             st.secrets["gcp_service_account_sheets"],
@@ -20,57 +18,69 @@ def get_user_data():
         service = build("sheets", "v4", credentials=creds)
         result = service.spreadsheets().values().get(
             spreadsheetId=st.secrets["sheets_ID"],
-            range="USERS!A2:C",
+            range="USERS!A2:D",  # Asegúrate de incluir la columna de contraseña
         ).execute()
         return result.get("values", [])
     except Exception as e:
         st.error(f"Error al cargar usuarios: {str(e)}")
         return []
 
-# Procesamiento de usuarios
-users = get_user_data()
-st.write("Datos crudos de Google Sheets:", users)
-
-if not users:
-    st.error("No se pudieron cargar los usuarios desde Google Sheets")
-    st.stop()
+def setup_authentication():
+    users = get_user_data()
     
-names = [user[2] for user in users]
-usernames = [user[1] for user in users]
-roles = [user[0] for user in users]
+    if not users:
+        st.error("No se encontraron usuarios en la hoja de cálculo")
+        st.stop()
+    
+    credentials = {"usernames": {}}
+    roles_mapping = {}
+    
+    for user in users:
+        if len(user) >= 4:  # Verifica las 4 columnas (ROL, DNI, NOMBRE, CONTRASEÑA)
+            dni = str(user[1])  # Asegura que DNI sea string
+            name = user[2]
+            password = user[3]
+            role = user[0].lower()  # Normaliza a minúsculas
+            
+            # Hasheo seguro de la contraseña
+            hashed_password = stauth.Hasher([password]).generate()[0]
+            
+            credentials["usernames"][dni] = {
+                "name": name,
+                "password": hashed_password
+            }
+            roles_mapping[dni] = role
+    
+    return credentials, roles_mapping
 
-# Generación de contraseñas (basadas en DNI + salt)
-salt = st.secrets.get("PASSWORD_SALT", "default_salt")
-passwords = [hashlib.sha256(f"{dni}{salt}".encode()).hexdigest()[:8] for dni in usernames]
-
-# Configuración del autenticador
+# Configuración de autenticación
+credentials, roles_mapping = setup_authentication()
 authenticator = stauth.Authenticate(
-    dict(zip(usernames, [{"name": name, "password": pwd} for name, pwd in zip(names, passwords)])),
+    credentials,
     st.secrets["cookie"]["name"],
     st.secrets["cookie"]["key"],
     st.secrets["cookie"]["expiry_days"],
 )
 
-# ===== INTERFAZ DE AUTENTICACIÓN =====
+# ===== INTERFAZ DE LOGIN =====
 name, authentication_status, username = authenticator.login("Inicio de Sesión", "main")
 
 if not authentication_status:
     st.stop()
 
 if authentication_status is False:
-    st.error("Usuario/contraseña incorrectos")
+    st.error("Usuario o contraseña incorrectos")
     st.stop()
 
-# ===== POST-LOGIN (APLICACIÓN PRINCIPAL) =====
+# ===== APLICACIÓN PRINCIPAL (POST-LOGIN) =====
 authenticator.logout("Cerrar Sesión", "sidebar")
-st.session_state.role = roles[usernames.index(username)]
+st.session_state.role = roles_mapping[username]
 
 # Mostrar información de usuario
 st.sidebar.write(f"**Usuario:** {name}")
 st.sidebar.write(f"**Rol:** {st.session_state.role.upper()}")
 
 # ===== CONFIGURACIÓN BIGQUERY =====
-
 @st.cache_resource
 def get_bigquery_client():
     credentials = service_account.Credentials.from_service_account_info(
@@ -81,6 +91,12 @@ def get_bigquery_client():
 
 client = get_bigquery_client()
 
+# ===== CONFIGURACIÓN DE COLUMNAS =====
+fixed_columns = st.config.get("columns.fixed_columns")
+month_columns = st.config.get("columns.month_columns")
+
+all_columns = fixed_columns + month_columns
+
 # ===== INTERFAZ DE LA APLICACIÓN =====
 st.title("⚡ Consultas del Maestro ⚡")
 st.markdown("""
@@ -89,7 +105,7 @@ en los últimos 13 meses.
 """)
 
 # Control de acceso basado en roles
-if st.session_state.role in ['ANALISTA', 'SUPERVISOR']:
+if st.session_state.role in ['analista', 'supervisor']:
     search_type = st.radio(
         "Seleccionar tipo de búsqueda:",
         options=["Suministro", "SED"],
@@ -99,27 +115,9 @@ else:
     search_type = "Suministro"
     st.write("**Búsqueda por Suministro**")
 
-
-fixed_columns = st.config.get("columns.fixed_columns")
-month_columns = st.config.get("columns.month_columns")
-
-all_columns = fixed_columns + month_columns
-
-
-st.title("Consulta de Consumo por Cliente")
-st.markdown("""
-Esta aplicación muestra los datos de clientes junto con su consumo histórico 
-en los últimos 13 meses.
-""")
-
-search_type = st.radio(
-    "Seleccionar tipo de búsqueda:",
-    options=["Suministro", "SED"],
-    horizontal=True
-)
-
+# Input según el tipo de búsqueda
 if search_type == "Suministro":
-    search_value = st.number_input("Ingrese el número de suministro:", step=1 )
+    search_value = st.number_input("Ingrese el número de suministro:", step=1)
 else:
     search_value = st.text_input("Ingrese el código SED:")
 
@@ -128,7 +126,7 @@ def run_query(search_type, search_value):
     if not search_value:
         st.warning("Por favor ingrese un valor para buscar")
         return None
-
+    
     columns_str = ", ".join([f'`{col}`' for col in all_columns])
     
     if search_type == "Suministro":
