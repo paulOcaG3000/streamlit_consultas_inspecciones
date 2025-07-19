@@ -29,6 +29,7 @@ def get_user_data():
 
 # Procesamiento de usuarios
 users = get_user_data()
+st.write("Datos crudos de Google Sheets:", users)
 
 if not users:
     st.error("No se pudieron cargar los usuarios desde Google Sheets")
